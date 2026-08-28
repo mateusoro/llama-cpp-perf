@@ -1,0 +1,124 @@
+name: Build OpenCL Android Optimized (arm64)
+
+on:
+  workflow_dispatch: # permite disparo manual
+
+env:
+  LLAMA_ARG_LOG_COLORS: 1
+  LLAMA_ARG_LOG_PREFIX: 1
+  LLAMA_ARG_LOG_TIMESTAMPS: 1
+
+jobs:
+  opencl-android-arm64-optimized:
+    runs-on: ubuntu-latest
+
+    env:
+      NDK_VERSION: "29.0.14206865"
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install NDK
+        run: |
+          sdkmanager "ndk;${{ env.NDK_VERSION }}"
+          echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+
+      - name: Clone OpenCL Headers and ICD Loader
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader
+          echo "OPENCL_HEADERS_DIR=$(pwd)/OpenCL-Headers" >> $GITHUB_ENV
+          echo "OPENCL_LOADER_DIR=$(pwd)/OpenCL-ICD-Loader" >> $GITHUB_ENV
+
+      - name: Build OpenCL ICD Loader (Android)
+        run: |
+          cmake -B build-opencl-loader \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-28 \
+            -DOPENCL_ICD_LOADER_HEADERS_DIR=${OPENCL_HEADERS_DIR} \
+            -DBUILD_TESTING=OFF \
+            -S ${OPENCL_LOADER_DIR}
+          cmake --build build-opencl-loader --target OpenCL
+          mkdir -p pkg/usr/lib
+          cp build-opencl-loader/libOpenCL.so pkg/usr/lib/
+
+      - name: Build llama-server with OpenCL + CPU optimizations (Android arm64)
+        id: cmake_build
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-28 \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU_ARM_ARCH=armv8.6-a+dotprod+fp16+i8mm \
+            -DGGML_CPU_KLEIDIAI=ON \
+            -DGGML_LTO=ON \
+            -DGGML_LLAMAFILE=ON \
+            -DGGML_CPU_REPACK=ON \
+            -DGGML_SCHED_NO_REALLOC=ON \
+            -DGGML_OPENMP=ON \
+            -DLLAMA_OPENSSL=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_OPENCL=ON \
+            -DGGML_OPENCL_USE_ADRENO_KERNELS=ON \
+            -DGGML_OPENCL_EMBED_KERNELS=ON \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_UI=OFF \
+            -DOpenCL_INCLUDE_DIR=${OPENCL_HEADERS_DIR} \
+            -DOpenCL_LIBRARY=$(pwd)/build-opencl-loader/libOpenCL.so
+          cmake --build build --target llama-server --config Release -j $(nproc)
+
+      - name: Package artifact
+        run: |
+          mkdir -p pkg/usr/bin
+          cp build/bin/llama-server pkg/usr/bin/
+          cp build/lib/libggml-opencl.so pkg/usr/lib/ 2>/dev/null || true
+          tar -czf llama-server-opencl-android-arm64-opt.tar.gz -C pkg .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-server-opencl-android-arm64-opt
+          path: llama-server-opencl-android-arm64-opt.tar.gz
+          retention-days: 14
+
+      - name: Release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: opencl-android-opt-${{ github.run_id }}
+          name: llama.cpp OpenCL Android arm64 OPTIMIZED (run ${{ github.run_id }})
+          files: llama-server-opencl-android-arm64-opt.tar.gz
+          body: |
+            Binário llama-server compilado com backend OpenCL (Adreno) + otimizações CPU para Android arm64.
+            Flags extras vs build padrão: GGML_CPU_ARM_ARCH=armv8.6-a+dotprod+fp16+i8mm, GGML_CPU_KLEIDIAI=ON,
+            GGML_LTO=ON, GGML_LLAMAFILE=ON, GGML_CPU_REPACK=ON, GGML_SCHED_NO_REALLOC=ON, GGML_OPENMP=ON, LLAMA_OPENSSL=OFF.
+            Build de ${{ github.ref }} @ ${{ github.sha }}.
