@@ -83,7 +83,6 @@ jobs:
             -DGGML_LTO=ON \
             -DGGML_LLAMAFILE=ON \
             -DGGML_CPU_REPACK=ON \
-            -DGGML_SCHED_NO_REALLOC=ON \
             -DGGML_OPENMP=ON \
             -DLLAMA_OPENSSL=OFF \
             -DBUILD_SHARED_LIBS=OFF \
@@ -123,5 +122,5 @@ jobs:
           body: |
             Binário llama-server compilado com backend OpenCL (Adreno) + otimizações CPU para Android arm64.
             Flags extras vs build padrão: GGML_CPU_ARM_ARCH=armv8.6-a+dotprod+fp16+i8mm, GGML_CPU_KLEIDIAI=ON,
-            GGML_LTO=ON, GGML_LLAMAFILE=ON, GGML_CPU_REPACK=ON, GGML_SCHED_NO_REALLOC=ON, GGML_OPENMP=ON, LLAMA_OPENSSL=OFF.
+            GGML_LTO=ON, GGML_LLAMAFILE=ON, GGML_CPU_REPACK=ON, GGML_OPENMP=ON, LLAMA_OPENSSL=OFF.
             Build de ${{ github.ref }} @ ${{ github.sha }}.
