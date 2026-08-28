@@ -100,9 +100,18 @@ jobs:
 
       - name: Package artifact
         run: |
-          mkdir -p pkg/usr/bin
+          mkdir -p pkg/usr/bin pkg/usr/lib
           cp build/bin/llama-server pkg/usr/bin/
           cp build/lib/libggml-opencl.so pkg/usr/lib/ 2>/dev/null || true
+          # GGML_OPENMP=ON: o binário requer libomp.so (não existe no Android).
+          # Copia o do NDK (clang do toolchain) para o pacote.
+          OMP=$(find "${ANDROID_NDK}/toolchains/llvm/prebuilt" -path '*lib/linux/aarch64/libomp.so' | head -1)
+          if [ -n "$OMP" ]; then
+            cp "$OMP" pkg/usr/lib/libomp.so
+            echo "libomp.so empacotado de: $OMP"
+          else
+            echo "AVISO: libomp.so não encontrado no NDK"
+          fi
           tar -czf llama-server-opencl-android-arm64-opt.tar.gz -C pkg .
 
       - name: Upload artifact
