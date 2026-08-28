@@ -3,6 +3,9 @@ name: Build OpenCL Android Optimized (arm64)
 on:
   workflow_dispatch: # permite disparo manual
 
+permissions:
+  contents: write # necessário para criar o release (softprops/action-gh-release)
+
 env:
   LLAMA_ARG_LOG_COLORS: 1
   LLAMA_ARG_LOG_PREFIX: 1
