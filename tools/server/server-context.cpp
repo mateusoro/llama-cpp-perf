@@ -2535,6 +2535,43 @@ private:
                     const size_t token_count = tokens.size();
                     const size_t nwrite = llama_state_seq_save_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), token_count);
 
+                    // sidecar: persist prompt checkpoints alongside KV state
+                    {
+                        const auto & checkpoints = slot->prompt.checkpoints;
+                        if (!checkpoints.empty()) {
+                            std::string ckpt_path = filepath + ".ckpt";
+                            std::ofstream ckpt(ckpt_path, std::ios::binary);
+                            if (ckpt) {
+                                uint32_t magic = 0x434B5054; // "CKPT"
+                                uint32_t version = 1;
+                                uint32_t count = (uint32_t)checkpoints.size();
+                                ckpt.write((const char*)&magic, sizeof(magic));
+                                ckpt.write((const char*)&version, sizeof(version));
+                                ckpt.write((const char*)&count, sizeof(count));
+                                for (const auto & cp : checkpoints) {
+                                    int64_t n_t = cp.n_tokens;
+                                    int id_t = cp.id_task;
+                                    llama_pos pmin = cp.pos_min;
+                                    llama_pos pmax = cp.pos_max;
+                                    uint64_t sz_tgt = cp.data_tgt.size();
+                                    uint64_t sz_dft = cp.data_dft.size();
+                                    uint64_t sz_spec = cp.data_spec.size();
+                                    ckpt.write((const char*)&n_t, sizeof(n_t));
+                                    ckpt.write((const char*)&id_t, sizeof(id_t));
+                                    ckpt.write((const char*)&pmin, sizeof(pmin));
+                                    ckpt.write((const char*)&pmax, sizeof(pmax));
+                                    ckpt.write((const char*)&sz_tgt, sizeof(sz_tgt));
+                                    if (sz_tgt > 0) ckpt.write((const char*)cp.data_tgt.data(), sz_tgt);
+                                    ckpt.write((const char*)&sz_dft, sizeof(sz_dft));
+                                    if (sz_dft > 0) ckpt.write((const char*)cp.data_dft.data(), sz_dft);
+                                    ckpt.write((const char*)&sz_spec, sizeof(sz_spec));
+                                    if (sz_spec > 0) ckpt.write((const char*)cp.data_spec.data(), sz_spec);
+                                }
+                                SRV_INF("saved %d checkpoints to sidecar: %s\n", (int)count, ckpt_path.c_str());
+                            }
+                        }
+                    }
+
                     const int64_t t_end = ggml_time_us();
                     const double t_save_ms = (t_end - t_start) / 1000.0;
 
@@ -2580,6 +2617,36 @@ private:
                     tokens.resize(token_count);
                     slot->prompt.clear();
                     slot->prompt.tokens.insert(tokens);
+
+                    // sidecar: restore prompt checkpoints
+                    {
+                        std::string ckpt_path = filepath + ".ckpt";
+                        std::ifstream ckpt(ckpt_path, std::ios::binary);
+                        if (ckpt) {
+                            uint32_t magic = 0, version = 0, count = 0;
+                            ckpt.read((char*)&magic, sizeof(magic));
+                            ckpt.read((char*)&version, sizeof(version));
+                            ckpt.read((char*)&count, sizeof(count));
+                            if (magic == 0x434B5054 && version == 1 && count > 0 && count <= 1024) {
+                                for (uint32_t i = 0; i < count; i++) {
+                                    common_prompt_checkpoint cp;
+                                    ckpt.read((char*)&cp.n_tokens, sizeof(cp.n_tokens));
+                                    ckpt.read((char*)&cp.id_task, sizeof(cp.id_task));
+                                    ckpt.read((char*)&cp.pos_min, sizeof(cp.pos_min));
+                                    ckpt.read((char*)&cp.pos_max, sizeof(cp.pos_max));
+                                    uint64_t sz_tgt, sz_dft, sz_spec;
+                                    ckpt.read((char*)&sz_tgt, sizeof(sz_tgt));
+                                    if (sz_tgt > 0) { cp.data_tgt.resize(sz_tgt); ckpt.read((char*)cp.data_tgt.data(), sz_tgt); }
+                                    ckpt.read((char*)&sz_dft, sizeof(sz_dft));
+                                    if (sz_dft > 0) { cp.data_dft.resize(sz_dft); ckpt.read((char*)cp.data_dft.data(), sz_dft); }
+                                    ckpt.read((char*)&sz_spec, sizeof(sz_spec));
+                                    if (sz_spec > 0) { cp.data_spec.resize(sz_spec); ckpt.read((char*)cp.data_spec.data(), sz_spec); }
+                                    slot->prompt.checkpoints.push_back(std::move(cp));
+                                }
+                                SRV_INF("restored %d checkpoints from sidecar: %s\n", (int)count, ckpt_path.c_str());
+                            }
+                        }
+                    }
 
                     const int64_t t_end = ggml_time_us();
                     const double t_restore_ms = (t_end - t_start) / 1000.0;
