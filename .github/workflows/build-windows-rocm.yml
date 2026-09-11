@@ -164,17 +164,35 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # ggml-hip.dll loads amdhip64_7.dll at runtime; the Adrenalin driver ships
-          # one in System32 which the loader finds first. Copy the matching runtime
-          # next to the binaries so the right version is used.
+          # ggml-hip.dll loads amdhip64_7.dll at run time; the Adrenalin driver
+          # ships one in System32 which the loader finds first. Copy the matching
+          # runtime next to the binaries so the right version is used.
+          # rocm_kpack.dll is amdhip64_7's direct dependency (it carries the GPU
+          # kernels in ROCm 10 - there is no rocblas/library any more).
+          # amd_comgr is copied as well to keep it in sync with the bundled
+          # amdhip64, avoiding a version mismatch with a amd_comgr from System32.
+          # hipblas/rocblas/rocsolver are imported by ggml-hip.dll too (BLAS) and
+          # are NOT optional: without hipblas.dll ggml-hip.dll fails to load and
+          # the resulting package dies with 0xC0000135. libhipblaslt/origami are
+          # rocblas.dll's own dependencies. None of these DLLs live in System32
+          # or ship with the Adrenalin driver, so they must be bundled.
           $binPath = (rocm-sdk path --bin).Trim()
           if (-not $binPath) { throw "rocm-sdk path --bin returned empty" }
           write-host "ROCm bin path: $binPath"
 
-          $patterns = @("amdhip64_7.dll", "rocm_kpack.dll", "amd_comgr.dll")
+          $patterns = @(
+            "amdhip64_7.dll",
+            "rocm_kpack.dll",
+            "amd_comgr.dll",
+            "hipblas.dll",
+            "rocblas.dll",
+            "rocsolver.dll",
+            "libhipblaslt.dll",
+            "origami.dll"
+          )
           foreach ($pattern in $patterns) {
             $files = Get-ChildItem -Path $binPath -Filter $pattern -ErrorAction SilentlyContinue
-            if (-not $files) { write-host "WARN: no match for $pattern"; continue }
+            if (-not $files) { throw "no match for $pattern in $binPath" }
             foreach ($f in $files) {
               Copy-Item $f.FullName -Destination build\bin -Force
               write-host "  copied $($f.Name)"
