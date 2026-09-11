@@ -141,7 +141,7 @@ jobs:
             -DAMDGPU_TARGETS="${{ env.GFX_TARGETS }}" `
             -DGPU_TARGETS="${{ env.GFX_TARGETS }}" `
             -DLLAMA_BUILD_SERVER=ON `
-            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_BUILD_UI=OFF `
             -DLLAMA_BUILD_TESTS=OFF
 
           cmake --build build -j ${env:NUMBER_OF_PROCESSORS}
@@ -295,7 +295,7 @@ jobs:
             -DGGML_CUDA=OFF \
             -DGPU_TARGETS="${{ env.GFX_TARGETS }}" \
             -DLLAMA_BUILD_SERVER=ON \
-            -DLLAMA_BUILD_WEBUI=OFF \
+            -DLLAMA_BUILD_UI=OFF \
             -DLLAMA_BUILD_TESTS=OFF
           cmake --build build -j $(nproc)
           echo "Build completed successfully."
