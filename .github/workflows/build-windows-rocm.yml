@@ -282,10 +282,12 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
           $check = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $archive))
           $entries = $check.Entries.Count
-          # FullName usa '\' como separador no Windows, entao nao filtre por 'rocblas/'.
-          $kernels = ($check.Entries | Where-Object { $_.FullName -like "rocblas\*" }).Count
+          # O separador de path do FullName varia com a versao do PowerShell ('\' no
+          # 5.1, '/' no pwsh 7), entao conte pelos nomes dos arquivos de kernel, que
+          # sao iguais nos dois.
+          $kernels = ($check.Entries | Where-Object { $_.FullName -match 'TensileLibrary.*\.(dat|co|hsaco)|Kernels\.so' }).Count
           $check.Dispose()
-          if ($kernels -eq 0) { throw "archive $archive has no rocblas/ kernels" }
+          if ($kernels -eq 0) { throw "archive $archive has no rocBLAS/hipBLASLt Tensile kernels" }
           Write-Host "Archive: $archive ($entries entries, $kernels rocblas kernel files)" -ForegroundColor Green
 
       - name: Upload artifact
