@@ -270,10 +270,23 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $archive = "llama-windows-x64-${{ env.GFX_TARGETS }}.zip"
           $archive = $archive.Replace(';', '_')
-          Compress-Archive -Path "build\bin\*.exe", "build\bin\*.dll" -DestinationPath $archive
-          Write-Host "Archive: $archive" -ForegroundColor Green
+          # Tem que incluir os diretorios de kernels Tensile (rocblas/, hipblaslt/),
+          # senao o pacote sobe sem eles e todo GEMM aborta em runtime.
+          $items = @("build\bin\*.exe", "build\bin\*.dll") +
+                   @(Get-ChildItem build\bin -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+          Compress-Archive -Path $items -DestinationPath $archive -Force
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+          $check = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $archive))
+          $entries = $check.Entries.Count
+          # FullName usa '\' como separador no Windows, entao nao filtre por 'rocblas/'.
+          $kernels = ($check.Entries | Where-Object { $_.FullName -like "rocblas\*" }).Count
+          $check.Dispose()
+          if ($kernels -eq 0) { throw "archive $archive has no rocblas/ kernels" }
+          Write-Host "Archive: $archive ($entries entries, $kernels rocblas kernel files)" -ForegroundColor Green
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
