@@ -1,29 +1,33 @@
 name: Build Windows ROCm HIP
 
-# Build variação do llama.cpp (upstream thecodacus/llama.cpp) com backend ROCm/HIP.
-# Cria uma NOVA release a cada execução (tag build-<run_number>).
-# Disparado manualmente (workflow_dispatch), por push em perf, ou automaticamente
-# pelo workflow sync-upstream (que só dispara o build quando há commits novos no upstream).
+# Build do llama.cpp (upstream thecodacus/llama.cpp, branch perf) com backend ROCm/HIP.
+# Layout novo do ROCm para Windows (TheRock wheels + rocm-sdk), inspirado no job `hip`
+# do build-cuda-windows.yml / release.yml do llama.cpp, com nossas melhorias:
+#   - concurrency: apenas 1 build por vez (novo cancela o antigo)
+#   - release automática a cada build (tag build-<run_number>, nunca sobrescreve)
+#   - inputs de gfx targets e da versão do ROCm
+#   - ccache para acelerar builds repetidos
+#   - bundle das DLLs de runtime (amdhip64_7.dll etc.) para o binário rodar direto
 
 on:
   push:
     branches: [perf]
   workflow_dispatch:
     inputs:
-      gfx_target:
-        description: 'GPU architecture target (gfx1030, gfx1100, gfx1101, gfx1151, gfx1200)'
+      gfx_targets:
+        description: 'GPU targets (separados por ; )'
         required: false
         default: 'gfx1101'
-      linux_rocm_version:
-        description: 'ROCm version for the Linux build (rocm-hip-sdk via repo.radeon.com/rocm/apt, e.g. 7.2.1)'
+      rocm_version:
+        description: 'ROCm wheel version (rocm[libraries,devel]==VERSION). Disponivel no indice: 10.0.0'
         required: false
-        default: '7.2.1'
+        default: '10.0.0'
 
 env:
-  GFX_TARGET: ${{ github.event.inputs.gfx_target || 'gfx1101' }}
+  GFX_TARGETS: ${{ github.event.inputs.gfx_targets || 'gfx1101' }}
   UPSTREAM_REPO: 'https://github.com/thecodacus/llama.cpp.git'
-  HIPSDK_INSTALLER_VERSION: '26.Q1'
-  ROCM_LINUX_VERSION: ${{ github.event.inputs.linux_rocm_version || '7.2.1' }}
+  # Make sure this is in sync with build-cache.yml
+  ROCM_VERSION: ${{ github.event.inputs.rocm_version || '10.0.0' }}
   # Nova release a cada execução: run_number é único por execução do workflow.
   RELEASE_TAG: 'build-${{ github.run_number }}'
 
@@ -34,11 +38,12 @@ concurrency:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   build-windows:
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout fork
@@ -48,9 +53,9 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "=== Clonando upstream ===" -ForegroundColor Cyan
-          git clone ${{ env.UPSTREAM_REPO }} upstream-temp
+          git clone --depth 1 --branch perf ${{ env.UPSTREAM_REPO }} upstream-temp
 
-          # Copiar upstream para cima do fork (preserva .github/workflows e .github/actions nossos)
+          # Copiar upstream para cima do fork (preserva .github/ nosso)
           $items = Get-ChildItem upstream-temp -Force
           foreach ($item in $items) {
               if ($item.Name -eq ".git") { continue }
@@ -61,62 +66,80 @@ jobs:
           Remove-Item upstream-temp -Recurse -Force
           Write-Host "=== Pronto ===" -ForegroundColor Cyan
 
-      - name: Use ROCm Installation Cache
-        uses: actions/cache@v5
-        id: cache-rocm
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.24
         with:
-          path: C:\Program Files\AMD\ROCm
-          key: cache-rocm-${{ env.HIPSDK_INSTALLER_VERSION }}-${{ runner.os }}
+          key: llama-windows-hip-${{ env.ROCM_VERSION }}-${{ env.GFX_TARGETS }}
+          evict-old-files: 1d
+          max-size: "1G"
 
       - name: Setup ROCm
-        if: steps.cache-rocm.outputs.cache-hit != 'true'
+        uses: ./.github/actions/windows-setup-rocm
+        with:
+          version: ${{ env.ROCM_VERSION }}
+
+      - name: Setup ROCm Environment
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          write-host "Downloading Installer EXE"
-          Invoke-WebRequest -Uri "https://download.amd.com/developer/eula/rocm-hub/AMD-Software-PRO-Edition-${{ env.HIPSDK_INSTALLER_VERSION }}-Win11-For-HIP.exe" -OutFile "${env:RUNNER_TEMP}\temp-install.exe"
-          write-host "Running Installer (timeout 10 min)"
-          $proc = Start-Process -FilePath "${env:RUNNER_TEMP}\temp-install.exe" -ArgumentList "-install" -PassThru -NoNewWindow
-          $completed = $proc.WaitForExit(600000)
-          if (-not $completed) {
-              Write-Error "Installer timed out. Killing the process"
-              try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
-              exit 1
-          }
-          if ($proc.ExitCode -ne 0) {
-              Write-Error "Installer failed with exit code $($proc.ExitCode)"
-              exit 1
-          }
-          write-host "Install done"
+
+          # Activate venv from install
+          & C:\TheRock\build\.venv\Scripts\Activate.ps1
+
+          # Expand the devel tree (idempotent; no-op if already done during install)
+          rocm-sdk init
+          if ($LASTEXITCODE -ne 0) { throw "rocm-sdk init failed with exit code $LASTEXITCODE" }
+
+          # Get ROCm installation paths using the rocm-sdk CLI tool
+          $rocmPath = (rocm-sdk path --root)
+          if (-not $rocmPath) { throw "rocm-sdk path --root returned empty - devel package may not be installed" }
+          $rocmPath = $rocmPath.Trim()
+          $cmakePath = (rocm-sdk path --cmake).Trim()
+          $binPath = (rocm-sdk path --bin).Trim()
+          write-host "ROCm root: $rocmPath"
+          write-host "CMake path: $cmakePath"
+          write-host "Bin path: $binPath"
+
+          echo "HIP_PATH=$rocmPath" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$cmakePath" >> $env:GITHUB_ENV
+          echo "HIP_DEVICE_LIB_PATH=$rocmPath\lib\llvm\amdgcn\bitcode" >> $env:GITHUB_ENV
+          echo "HIP_PLATFORM=amd" >> $env:GITHUB_ENV
+          echo "LLVM_PATH=$rocmPath\lib\llvm" >> $env:GITHUB_ENV
+          echo "$binPath" >> $env:GITHUB_PATH
+
+          # Keep venv in PATH for subsequent steps
+          echo "C:\TheRock\build\.venv\Scripts" >> $env:GITHUB_PATH
 
       - name: Verify ROCm
+        shell: pwsh
         run: |
-          $clangPath = Get-ChildItem 'C:\Program Files\AMD\ROCm\*\bin\clang.exe' | Select-Object -First 1
-          if (-not $clangPath) { throw "ROCm not found" }
-          & $clangPath.FullName --version
-
-      - name: Setup Ninja
-        run: choco install ninja -y
+          # Test the ROCm clang shipped in the installed wheel
+          & "${env:HIP_PATH}\lib\llvm\bin\clang.exe" --version
 
       - name: Build
         shell: pwsh
         run: |
-          $env:HIP_PATH = (Resolve-Path 'C:\Program Files\AMD\ROCm\*\bin\clang.exe' | Split-Path | Split-Path)
-          $env:CMAKE_PREFIX_PATH = $env:HIP_PATH
-          $env:PATH = "$env:HIP_PATH\bin;$env:PATH"
-
           Write-Host "HIP Path: $env:HIP_PATH" -ForegroundColor Cyan
-          Write-Host "Target: ${{ env.GFX_TARGET }}" -ForegroundColor Cyan
+          Write-Host "Targets: ${{ env.GFX_TARGETS }}" -ForegroundColor Cyan
 
           cmake -G "Ninja" -B build -S . `
-            -DCMAKE_C_COMPILER="$env:HIP_PATH\bin\clang.exe" `
-            -DCMAKE_CXX_COMPILER="$env:HIP_PATH\bin\clang++.exe" `
+            -DCMAKE_PREFIX_PATH="${env:HIP_PATH}" `
+            -DCMAKE_C_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang.exe" `
+            -DCMAKE_CXX_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang++.exe" `
+            -DCMAKE_HIP_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang.exe" `
             -DCMAKE_BUILD_TYPE=Release `
+            -DLLAMA_BUILD_BORINGSSL=ON `
+            -DHIP_PATH="${env:HIP_PATH}" `
             -DGGML_HIP=ON `
             -DGGML_HIP_FORCE_MMQ=ON `
             -DGGML_VULKAN=OFF `
             -DGGML_CUDA=OFF `
-            -DGPU_TARGETS="${{ env.GFX_TARGET }}" `
+            -DGGML_RPC=ON `
+            -DAMDGPU_TARGETS="${{ env.GFX_TARGETS }}" `
+            -DGPU_TARGETS="${{ env.GFX_TARGETS }}" `
             -DLLAMA_BUILD_SERVER=ON `
             -DLLAMA_BUILD_WEBUI=OFF `
             -DLLAMA_BUILD_TESTS=OFF
@@ -124,17 +147,51 @@ jobs:
           cmake --build build -j ${env:NUMBER_OF_PROCESSORS}
           Write-Host "Build OK" -ForegroundColor Green
 
+      - name: Verify HIP backend was built
+        shell: pwsh
+        run: |
+          $hipDll = Get-ChildItem -Path build\bin -Filter "ggml-hip*.dll" -ErrorAction SilentlyContinue
+          if (-not $hipDll) {
+            Write-Host "##[error]ggml-hip*.dll was NOT produced. The HIP backend silently failed to build."
+            Get-ChildItem build\bin | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Host "HIP backend artifact found:"
+          $hipDll | Format-Table FullName, Length -AutoSize
+
+      - name: Bundle HIP runtime DLLs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # ggml-hip.dll loads amdhip64_7.dll at runtime; the Adrenalin driver ships
+          # one in System32 which the loader finds first. Copy the matching runtime
+          # next to the binaries so the right version is used.
+          $binPath = (rocm-sdk path --bin).Trim()
+          if (-not $binPath) { throw "rocm-sdk path --bin returned empty" }
+          write-host "ROCm bin path: $binPath"
+
+          $patterns = @("amdhip64_7.dll", "rocm_kpack.dll", "amd_comgr.dll")
+          foreach ($pattern in $patterns) {
+            $files = Get-ChildItem -Path $binPath -Filter $pattern -ErrorAction SilentlyContinue
+            if (-not $files) { write-host "WARN: no match for $pattern"; continue }
+            foreach ($f in $files) {
+              Copy-Item $f.FullName -Destination build\bin -Force
+              write-host "  copied $($f.Name)"
+            }
+          }
+
       - name: Package
         shell: pwsh
         run: |
-          $archive = "llama-windows-x64-${{ env.GFX_TARGET }}.zip"
+          $archive = "llama-windows-x64-${{ env.GFX_TARGETS }}.zip"
+          $archive = $archive.Replace(';', '_')
           Compress-Archive -Path "build\bin\*.exe", "build\bin\*.dll" -DestinationPath $archive
           Write-Host "Archive: $archive" -ForegroundColor Green
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: llama-Windows-${{ env.GFX_TARGET }}
+          name: llama-Windows-${{ env.ROCM_VERSION }}-${{ env.GFX_TARGETS }}
           path: llama-windows-*.zip
           retention-days: 90
 
@@ -142,12 +199,12 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "Build Windows ROCm (${{ env.GFX_TARGET }}) #${{ github.run_number }}"
+          name: "Build Windows ROCm ${{ env.ROCM_VERSION }} (${{ env.GFX_TARGETS }}) #${{ github.run_number }}"
           body: |
-            Build automático do llama.cpp para Windows com ROCm/HIP.
+            Build automático do llama.cpp (ROCmFPX perf) para Windows com ROCm/HIP.
 
-            **GPU Target:** ${{ env.GFX_TARGET }}
-            **ROCm Version:** 26.Q1 (7.1.1)
+            **GPU Targets:** ${{ env.GFX_TARGETS }}
+            **ROCm (TheRock wheels):** ${{ env.ROCM_VERSION }}
             **Commit:** ${{ github.sha }}
             **Release Tag:** ${{ env.RELEASE_TAG }}
 
@@ -161,9 +218,18 @@ jobs:
           draft: false
           prerelease: false
 
+      - name: ccache-clear
+        if: always()
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: llama-windows-hip-${{ env.ROCM_VERSION }}-${{ env.GFX_TARGETS }}
+
   build-linux:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
+
+    env:
+      ROCM_LINUX_VERSION: '7.2.1'
 
     steps:
       - name: Checkout fork
@@ -173,7 +239,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          git clone ${{ env.UPSTREAM_REPO }} upstream-temp
+          git clone --depth 1 --branch perf ${{ env.UPSTREAM_REPO }} upstream-temp
           cd "$GITHUB_WORKSPACE"
           shopt -s dotglob
           for item in upstream-temp/*; do
@@ -227,7 +293,7 @@ jobs:
             -DHIP_PLATFORM=amd \
             -DGGML_VULKAN=OFF \
             -DGGML_CUDA=OFF \
-            -DGPU_TARGETS="${{ env.GFX_TARGET }}" \
+            -DGPU_TARGETS="${{ env.GFX_TARGETS }}" \
             -DLLAMA_BUILD_SERVER=ON \
             -DLLAMA_BUILD_WEBUI=OFF \
             -DLLAMA_BUILD_TESTS=OFF
@@ -237,7 +303,8 @@ jobs:
       - name: Create release archive
         shell: bash
         run: |
-          archive="llama-linux-x64-rocm${{ env.ROCM_LINUX_VERSION }}-${{ env.GFX_TARGET }}.tar.gz"
+          archive="llama-linux-x64-rocm${{ env.ROCM_LINUX_VERSION }}-${{ env.GFX_TARGETS }}.tar.gz"
+          archive="${archive//;/_}"
           cp LICENSE build/bin/ 2>/dev/null || true
           tar -czvf "$archive" -C build/bin .
           echo "Archive: $archive"
@@ -245,7 +312,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: llama-Linux-${{ env.GFX_TARGET }}
+          name: llama-Linux-${{ env.ROCM_LINUX_VERSION }}-${{ env.GFX_TARGETS }}
           path: llama-linux-*.tar.gz
           retention-days: 90
 
