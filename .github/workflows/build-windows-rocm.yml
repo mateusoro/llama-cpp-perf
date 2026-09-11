@@ -120,6 +120,25 @@ jobs:
           # Test the ROCm clang shipped in the installed wheel
           & "${env:HIP_PATH}\lib\llvm\bin\clang.exe" --version
 
+      - name: Install ROCm device kernels (rocBLAS/hipBLASLt Tensile)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & C:\TheRock\build\.venv\Scripts\Activate.ps1
+
+          # Os wheels genericos rocm[libraries,devel] trazem a rocblas.dll SEM o
+          # banco de kernels Tensile. Resultado: o backend HIP carrega e detecta a
+          # GPU, mas qualquer GEMM aborta com:
+          #   rocBLAS error: Cannot read .../rocblas/library/TensileLibrary.dat
+          # O pacote de device carrega os kernels de UMA familia de GPU.
+          foreach ($t in "${{ env.GFX_TARGETS }}".Split(';')) {
+            $t = $t.Trim()
+            if (-not $t) { continue }
+            Write-Host "Installing ROCm device kernels for $t" -ForegroundColor Cyan
+            python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm-sdk-device-$t==${{ env.ROCM_VERSION }}"
+            if ($LASTEXITCODE -ne 0) { throw "failed to install rocm-sdk-device-$t" }
+          }
+
       - name: Build
         shell: pwsh
         run: |
@@ -182,6 +201,19 @@ jobs:
           Write-Host "CPU backend variants found:"
           $cpuVariants.Name -join ", "
 
+          # Sem os kernels Tensile o binario carrega mas todo GEMM aborta com
+          # "rocBLAS error: Cannot read .../rocblas/library/TensileLibrary.dat".
+          foreach ($t in "${{ env.GFX_TARGETS }}".Split(';')) {
+            $t = $t.Trim()
+            if (-not $t) { continue }
+            $tensile = Get-ChildItem -Path build\bin\rocblas\library -Filter "*$t*" -ErrorAction SilentlyContinue
+            if (-not $tensile) {
+              Write-Host "##[error]no rocBLAS Tensile kernels for $t in build\bin\rocblas\library"
+              exit 1
+            }
+            Write-Host "Tensile kernels for ${t}: $($tensile.Count) files"
+          }
+
       - name: Bundle HIP runtime DLLs
         shell: pwsh
         run: |
@@ -189,15 +221,18 @@ jobs:
           # ggml-hip.dll loads amdhip64_7.dll at run time; the Adrenalin driver
           # ships one in System32 which the loader finds first. Copy the matching
           # runtime next to the binaries so the right version is used.
-          # rocm_kpack.dll is amdhip64_7's direct dependency (it carries the GPU
-          # kernels in ROCm 10 - there is no rocblas/library any more).
-          # amd_comgr is copied as well to keep it in sync with the bundled
-          # amdhip64, avoiding a version mismatch with a amd_comgr from System32.
+          # rocm_kpack.dll is amdhip64_7's direct dependency. amd_comgr is copied
+          # as well to keep it in sync with the bundled amdhip64, avoiding a
+          # version mismatch with a amd_comgr from System32.
           # hipblas/rocblas/rocsolver are imported by ggml-hip.dll too (BLAS) and
           # are NOT optional: without hipblas.dll ggml-hip.dll fails to load and
           # the resulting package dies with 0xC0000135. libhipblaslt/origami are
           # rocblas.dll's own dependencies. None of these DLLs live in System32
           # or ship with the Adrenalin driver, so they must be bundled.
+          # The Tensile kernel databases (rocblas/library, hipblaslt/library) come
+          # from the rocm-sdk-device-* package installed above and are copied too -
+          # without them every GEMM aborts with "rocBLAS error: Cannot read
+          # TensileLibrary.dat".
           $binPath = (rocm-sdk path --bin).Trim()
           if (-not $binPath) { throw "rocm-sdk path --bin returned empty" }
           write-host "ROCm bin path: $binPath"
@@ -219,6 +254,17 @@ jobs:
               Copy-Item $f.FullName -Destination build\bin -Force
               write-host "  copied $($f.Name)"
             }
+          }
+
+          # Tensile kernel databases live in the library package, not in the devel
+          # bin directory that `rocm-sdk path --bin` points at.
+          $sitePackages = Split-Path -Parent (Split-Path -Parent $binPath)
+          $libBin = Join-Path $sitePackages '_rocm_sdk_libraries\bin'
+          foreach ($dir in @("rocblas", "hipblaslt")) {
+            $src = Join-Path $libBin $dir
+            if (-not (Test-Path $src)) { throw "missing kernel dir $src - was rocm-sdk-device-* installed?" }
+            Copy-Item $src -Destination build\bin -Recurse -Force
+            write-host "  copied $dir kernels ($((Get-ChildItem $src -Recurse -File).Count) files)"
           }
 
       - name: Package
