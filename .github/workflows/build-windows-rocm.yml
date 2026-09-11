@@ -137,7 +137,7 @@ jobs:
             -DGGML_HIP_FORCE_MMQ=ON `
             -DGGML_VULKAN=OFF `
             -DGGML_CUDA=OFF `
-            -DGGML_RPC=ON `
+            -DGGML_RPC=OFF `
             -DAMDGPU_TARGETS="${{ env.GFX_TARGETS }}" `
             -DGPU_TARGETS="${{ env.GFX_TARGETS }}" `
             -DLLAMA_BUILD_SERVER=ON `
