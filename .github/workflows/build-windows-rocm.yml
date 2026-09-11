@@ -138,6 +138,7 @@ jobs:
             -DCMAKE_CXX_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang++.exe" `
             -DCMAKE_HIP_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang.exe" `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_FLAGS="-Wno-error=incompatible-pointer-types" `
             -DLLAMA_BUILD_BORINGSSL=ON `
             -DHIP_PATH="${env:HIP_PATH}" `
             -DGGML_HIP=ON `
