@@ -126,6 +126,12 @@ jobs:
           Write-Host "HIP Path: $env:HIP_PATH" -ForegroundColor Cyan
           Write-Host "Targets: ${{ env.GFX_TARGETS }}" -ForegroundColor Cyan
 
+          # Sem GGML_NATIVE=OFF o cmake liga GGML_NATIVE (default ON quando nao ha
+          # cross-compile) e compila com -march=native na CPU do runner do GitHub
+          # (Xeon com AVX-512), gerando ggml-cpu com instrucoes EVEX/zmm que
+          # causam SIGILL ("Illegal instruction") em CPUs sem AVX-512, como o
+          # Ryzen 7 5800X (Zen 3). Com BACKEND_DL+ALL_VARIANTS o ggml-cpu vira
+          # varias DLLs e o loader escolhe a melhor para a CPU local em runtime.
           cmake -G "Ninja" -B build -S . `
             -DCMAKE_PREFIX_PATH="${env:HIP_PATH}" `
             -DCMAKE_C_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang.exe" `
@@ -136,12 +142,6 @@ jobs:
             -DHIP_PATH="${env:HIP_PATH}" `
             -DGGML_HIP=ON `
             -DGGML_HIP_FORCE_MMQ=ON `
-            # Sem isto o cmake liga GGML_NATIVE (default ON quando nao ha cross-compile)
-            # e compila com -march=native no runner do GitHub (Xeon com AVX-512),
-            # gerando ggml-cpu com instrucoes EVEX/zmm que causam SIGILL
-            # ("Illegal instruction") no Ryzen 7 5800X (Zen 3, sem AVX-512).
-            # Com BACKEND_DL+ALL_VARIANTS o ggml-cpu vira varias DLLs e o loader
-            # escolhe a melhor para a CPU local em runtime (ex.: haswell no Zen 3).
             -DGGML_NATIVE=OFF `
             -DGGML_CPU_ALL_VARIANTS=ON `
             -DGGML_BACKEND_DL=ON `
