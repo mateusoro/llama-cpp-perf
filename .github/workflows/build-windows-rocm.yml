@@ -151,6 +151,9 @@ jobs:
           # causam SIGILL ("Illegal instruction") em CPUs sem AVX-512, como o
           # Ryzen 7 5800X (Zen 3). Com BACKEND_DL+ALL_VARIANTS o ggml-cpu vira
           # varias DLLs e o loader escolhe a melhor para a CPU local em runtime.
+          # GGML_RPC=OFF: o branch perf tem GGML_OP_COUNT=102 e o ggml-rpc.cpp faz
+          # static_assert(==101), entao o RPC quebra o build. Religar quando o
+          # upstream sincronizar o RPC_PROTO_PATCH_VERSION.
           cmake -G "Ninja" -B build -S . `
             -DCMAKE_PREFIX_PATH="${env:HIP_PATH}" `
             -DCMAKE_C_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang.exe" `
