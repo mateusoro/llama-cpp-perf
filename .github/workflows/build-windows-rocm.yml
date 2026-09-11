@@ -201,19 +201,6 @@ jobs:
           Write-Host "CPU backend variants found:"
           $cpuVariants.Name -join ", "
 
-          # Sem os kernels Tensile o binario carrega mas todo GEMM aborta com
-          # "rocBLAS error: Cannot read .../rocblas/library/TensileLibrary.dat".
-          foreach ($t in "${{ env.GFX_TARGETS }}".Split(';')) {
-            $t = $t.Trim()
-            if (-not $t) { continue }
-            $tensile = Get-ChildItem -Path build\bin\rocblas\library -Filter "*$t*" -ErrorAction SilentlyContinue
-            if (-not $tensile) {
-              Write-Host "##[error]no rocBLAS Tensile kernels for $t in build\bin\rocblas\library"
-              exit 1
-            }
-            Write-Host "Tensile kernels for ${t}: $($tensile.Count) files"
-          }
-
       - name: Bundle HIP runtime DLLs
         shell: pwsh
         run: |
@@ -265,6 +252,19 @@ jobs:
             if (-not (Test-Path $src)) { throw "missing kernel dir $src - was rocm-sdk-device-* installed?" }
             Copy-Item $src -Destination build\bin -Recurse -Force
             write-host "  copied $dir kernels ($((Get-ChildItem $src -Recurse -File).Count) files)"
+          }
+
+          # Sem os kernels Tensile o binario carrega mas todo GEMM aborta com
+          # "rocBLAS error: Cannot read .../rocblas/library/TensileLibrary.dat".
+          foreach ($t in "${{ env.GFX_TARGETS }}".Split(';')) {
+            $t = $t.Trim()
+            if (-not $t) { continue }
+            $tensile = Get-ChildItem -Path build\bin\rocblas\library -Filter "*$t*" -ErrorAction SilentlyContinue
+            if (-not $tensile) {
+              Write-Host "##[error]no rocBLAS Tensile kernels for $t in build\bin\rocblas\library"
+              exit 1
+            }
+            Write-Host "Tensile kernels for ${t}: $($tensile.Count) files"
           }
 
       - name: Package
