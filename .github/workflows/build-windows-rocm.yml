@@ -136,6 +136,15 @@ jobs:
             -DHIP_PATH="${env:HIP_PATH}" `
             -DGGML_HIP=ON `
             -DGGML_HIP_FORCE_MMQ=ON `
+            # Sem isto o cmake liga GGML_NATIVE (default ON quando nao ha cross-compile)
+            # e compila com -march=native no runner do GitHub (Xeon com AVX-512),
+            # gerando ggml-cpu com instrucoes EVEX/zmm que causam SIGILL
+            # ("Illegal instruction") no Ryzen 7 5800X (Zen 3, sem AVX-512).
+            # Com BACKEND_DL+ALL_VARIANTS o ggml-cpu vira varias DLLs e o loader
+            # escolhe a melhor para a CPU local em runtime (ex.: haswell no Zen 3).
+            -DGGML_NATIVE=OFF `
+            -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_BACKEND_DL=ON `
             -DGGML_VULKAN=OFF `
             -DGGML_CUDA=OFF `
             -DGGML_RPC=OFF `
@@ -159,6 +168,18 @@ jobs:
           }
           Write-Host "HIP backend artifact found:"
           $hipDll | Format-Table FullName, Length -AutoSize
+
+          # Guarda contra a regressao do -march=native: sem CPU_ALL_VARIANTS a
+          # build gera um unico ggml-cpu.dll compilado para a CPU do runner
+          # (AVX-512) e o binario quebra com SIGILL em CPUs sem AVX-512.
+          $cpuVariants = Get-ChildItem -Path build\bin -Filter "ggml-cpu-*.dll" -ErrorAction SilentlyContinue
+          if (-not $cpuVariants) {
+            Write-Host "##[error]no ggml-cpu-*.dll variants were produced. GGML_CPU_ALL_VARIANTS/GGML_BACKEND_DL did not take effect."
+            Get-ChildItem build\bin | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Host "CPU backend variants found:"
+          $cpuVariants.Name -join ", "
 
       - name: Bundle HIP runtime DLLs
         shell: pwsh
