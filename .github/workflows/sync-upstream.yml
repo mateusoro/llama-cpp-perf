@@ -1,0 +1,75 @@
+name: Sync Upstream && Auto Build
+
+# 1x por semana (segunda 08:00 UTC):
+#  - busca TODOS os commits novos de thecodacus/llama.cpp (upstream) na branch master
+#  - se houver commit novo -> merge para atualizar o fork (código upstream intacto, workflows nossos preservados)
+#  - o push em master dispara o build-windows-rocm.yml, que cria release nova
+# Sem commits novos -> nada é feito (sem gastar minutos de build)
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: master
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/thecodacus/llama.cpp.git
+          # fetch-depth:0 no checkout ja traz historia completa; --unshallow falharia aqui
+          git fetch upstream master --tags
+          echo "LOCAL_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "UPSTREAM_HEAD=$(git rev-parse upstream/master)" >> "$GITHUB_ENV"
+
+      - name: Check for new commits
+        id: check
+        run: |
+          # true se TODOS os commits do upstream ja estao no fork (fork pode estar a frente pelos arquivos de workflow)
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "No new commits upstream: fork ja tem tudo de upstream ($UPSTREAM_HEAD)"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New commits available:"
+            git log --oneline HEAD..upstream/master | head -20
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "AHEAD=$(git rev-list --count HEAD..upstream/master)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream (keep fork's workflows)
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Nossos arquivos (.github/workflows/ + .github/actions/) sao adicoes puras que o upstream nao tem;
+          # merge padrao resolve sem conflitos.
+          git merge --no-ff upstream/master -m "chore: sync upstream $(git rev-parse --short upstream/master)"
+          git push origin master
+          echo "SYNCED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "SYNCED_SHORT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Resumo do sync" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.check.outputs.changed }}" = "true" ]; then
+            echo "- Commits novos do upstream: **${{ steps.check.outputs.AHEAD }}**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Merge aplicado em **$(git rev-parse --short HEAD 2>/dev/null || echo '...')**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- O push em master dispara o **build-windows-rocm.yml**, que cria uma release nova" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Workflows do fork mantidos (build-windows-rocm.yml)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Sem commits novos no upstream. Nada a fazer." >> "$GITHUB_STEP_SUMMARY"
+          fi
