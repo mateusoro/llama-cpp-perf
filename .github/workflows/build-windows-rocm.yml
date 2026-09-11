@@ -24,6 +24,7 @@ on:
         default: '10.0.0'
 
 env:
+  GH_TOKEN: ${{ github.token }}
   GFX_TARGETS: ${{ github.event.inputs.gfx_targets || 'gfx1101' }}
   UPSTREAM_REPO: 'https://github.com/thecodacus/llama.cpp.git'
   # Make sure this is in sync with build-cache.yml
